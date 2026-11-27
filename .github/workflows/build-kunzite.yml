@@ -89,44 +89,22 @@ jobs:
           compile_dt() {
             local src="$1"
             local out="$2"
-            echo "=== Compiling $src -> $out ===" | tee -a logs/devicetree.log
             clang -E -nostdinc -undef -D__DTS__ -x assembler-with-cpp \
               -I "$PWD/kernel/include" \
               -I "$PWD/kernel/arch/arm64/boot/dts" \
               -I "$PWD/devicetree" \
               -I "$PWD/devicetree/qcom" \
-              "$src" -o "${out}.dts.tmp" 2>&1 | tee -a logs/devicetree.log
+              "$src" -o "${out}.dts.tmp"
             "$DTC" -@ -O dtb -Wno-unit_address_vs_reg -Wno-avoid_unnecessary_addr_size \
               -i "$PWD/devicetree/qcom" -i "$PWD/devicetree" -i "$PWD/kernel/include" \
-              -o "$out" "${out}.dts.tmp" 2>&1 | tee -a logs/devicetree.log
+              -o "$out" "${out}.dts.tmp"
           }
 
           : > logs/devicetree.log
-          compile_dt "devicetree/qcom/parrot.dts" "out_dtbs/parrot.dtb" || true
-          compile_dt "devicetree/qcom/parrotp.dts" "out_dtbs/parrotp.dtb" || true
-          compile_dt "devicetree/qcom/kunzite-sm6475-overlay.dts" "out_dtbs/kunzite-sm6475-overlay.dtbo" || true
-          ls -lh out_dtbs/ | tee -a logs/devicetree.log
-
-      - name: Build Stage 2 - Audio Kernel (audio-kernel)
-        continue-on-error: true
-        shell: bash
-        run: |
-          set -o pipefail
-          export PATH="$PWD/clang/bin:$PATH"
-          export ARCH=arm64
-          export SUBARCH=arm64
-
-          echo "=== audio config files ===" | tee logs/audio.log
-          ls -la techpack/audio/config/ | tee -a logs/audio.log
-
-          make -C kernel O=out M="$PWD/techpack/audio" \
-            AUDIO_ROOT="$PWD/techpack/audio" \
-            KERNEL_SRC="$PWD/kernel" \
-            LLVM=1 LLVM_IAS=1 \
-            -j"$(nproc)" modules 2>&1 | tee -a logs/audio.log
-
-          echo "=== audio .ko produced ===" | tee -a logs/audio.log
-          find techpack/audio -name "*.ko" | tee -a logs/audio.log
+          compile_dt "devicetree/qcom/parrot.dts" "out_dtbs/parrot.dtb" 2>&1 | tee -a logs/devicetree.log || true
+          compile_dt "devicetree/qcom/parrotp.dts" "out_dtbs/parrotp.dtb" 2>&1 | tee -a logs/devicetree.log || true
+          compile_dt "devicetree/qcom/kunzite-sm6475-overlay.dts" "out_dtbs/kunzite-sm6475-overlay.dtbo" 2>&1 | tee -a logs/devicetree.log || true
+          ls -lh out_dtbs/*.dtb out_dtbs/*.dtbo | tee -a logs/devicetree.log
 
       - name: Build Stage 2 - Camera Kernel (camera-kernel)
         continue-on-error: true
@@ -137,18 +115,26 @@ jobs:
           export ARCH=arm64
           export SUBARCH=arm64
 
+          CAM_TFE_DIR="$(find techpack/camera -name 'cam_tfe.h' -exec dirname {} \; | head -n 1)"
+          echo "cam_tfe.h dir: ${CAM_TFE_DIR:-not found}" | tee logs/camera.log
+
+          KINC="-I$PWD/kernel"
+          if [ -n "$CAM_TFE_DIR" ]; then
+            KINC="$KINC -I$PWD/$CAM_TFE_DIR"
+          fi
+
           make -C kernel O=out M="$PWD/techpack/camera" \
             CAMERA_KERNEL_ROOT="$PWD/techpack/camera" \
             CAM_ROOT="$PWD/techpack/camera" \
             KERNEL_SRC="$PWD/kernel" \
-            EXTRA_CFLAGS="-I$PWD/kernel" \
+            KCPPFLAGS="$KINC" \
             LLVM=1 LLVM_IAS=1 \
-            -j"$(nproc)" modules 2>&1 | tee logs/camera.log
+            -j"$(nproc)" modules 2>&1 | tee -a logs/camera.log
 
           echo "=== camera .ko produced ===" | tee -a logs/camera.log
           find techpack/camera -name "*.ko" | tee -a logs/camera.log
 
-      - name: Build Stage 2 - Data Kernel (skip emac-dwc-eqos)
+      - name: Build Stage 2 - Audio Kernel (audio-kernel)
         continue-on-error: true
         shell: bash
         run: |
@@ -157,16 +143,42 @@ jobs:
           export ARCH=arm64
           export SUBARCH=arm64
 
-          : > logs/data.log
-          for kb in $(find techpack/data/drivers -name "Kbuild" ! -path "*emac-dwc-eqos*" 2>/dev/null); do
-            dir="$(dirname "$kb")"
-            echo "=== Building $dir ===" | tee -a logs/data.log
-            make -C kernel O=out M="$PWD/$dir" \
-              DATA_ROOT="$PWD/techpack/data" \
-              KERNEL_SRC="$PWD/kernel" \
-              EXTRA_CFLAGS="-I$PWD/kernel" \
-              LLVM=1 LLVM_IAS=1 \
-              -j"$(nproc)" modules 2>&1 | tee -a logs/data.log || true
+          echo "=== techpack/audio/Kbuild ===" | tee logs/audio.log
+          sed -n '1,80p' techpack/audio/Kbuild | tee -a logs/audio.log || true
+
+          make -C kernel O=out M="$PWD/techpack/audio" \
+            AUDIO_ROOT="$PWD/techpack/audio" \
+            KERNEL_SRC="$PWD/kernel" \
+            KCPPFLAGS="-I$PWD/kernel -I$PWD/techpack/audio/include -I$PWD/techpack/audio/include/uapi" \
+            LLVM=1 LLVM_IAS=1 \
+            -j"$(nproc)" modules 2>&1 | tee -a logs/audio.log
+
+          echo "=== audio .ko produced ===" | tee -a logs/audio.log
+          find techpack/audio -name "*.ko" | tee -a logs/audio.log
+
+      - name: Build Stage 2 - Data Kernel (data-kernel)
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          export PATH="$PWD/clang/bin:$PATH"
+          export ARCH=arm64
+          export SUBARCH=arm64
+
+          echo "=== data-kernel build files ===" | tee logs/data.log
+          find techpack/data -maxdepth 4 \( -name "Kbuild" -o -name "Makefile" -o -name "BUILD.bazel" \) | tee -a logs/data.log
+
+          for mf in $(find techpack/data -maxdepth 4 -name "Makefile" ! -path "*emac-dwc-eqos*" 2>/dev/null); do
+            dir="$(dirname "$mf")"
+            if grep -qE "obj-|KBUILD|modules" "$mf" 2>/dev/null; then
+              echo "=== Building $dir ===" | tee -a logs/data.log
+              make -C kernel O=out M="$PWD/$dir" \
+                DATA_ROOT="$PWD/techpack/data" \
+                KERNEL_SRC="$PWD/kernel" \
+                KCPPFLAGS="-I$PWD/kernel" \
+                LLVM=1 LLVM_IAS=1 \
+                -j"$(nproc)" modules 2>&1 | tee -a logs/data.log || true
+            fi
           done
 
           echo "=== data .ko produced ===" | tee -a logs/data.log
@@ -175,11 +187,11 @@ jobs:
       - name: Stage 2 Summary (tail of each module log)
         if: always()
         run: |
-          for f in logs/devicetree.log logs/audio.log logs/camera.log logs/data.log; do
+          for f in logs/camera.log logs/audio.log logs/data.log; do
             echo "========================================"
             echo "TAIL OF $f"
             echo "========================================"
-            tail -n 35 "$f" 2>/dev/null || echo "(no log)"
+            tail -n 40 "$f" 2>/dev/null || echo "(no log)"
           done
 
       - name: Collect compiled OSS artifacts
