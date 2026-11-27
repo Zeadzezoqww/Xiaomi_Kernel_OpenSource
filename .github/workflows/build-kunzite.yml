@@ -39,7 +39,7 @@ jobs:
           sudo apt-get install -y \
             bc bison flex libssl-dev libelf-dev python3 \
             cpio lz4 zstd zip curl ca-certificates dwarves \
-            device-tree-compiler libfdt-dev file
+            device-tree-compiler libfdt-dev
 
       - name: Cache AOSP Clang 18
         id: cache-clang
@@ -150,44 +150,13 @@ jobs:
           export ARCH=arm64
           export SUBARCH=arm64
 
-          echo "=== waipioauto.conf file type ===" | tee logs/audio.log
-          file techpack/audio/config/waipioauto.conf | tee -a logs/audio.log || true
-          echo "=== ipc/Kbuild (lines 181-260) ===" | tee -a logs/audio.log
-          sed -n '181,260p' techpack/audio/ipc/Kbuild | tee -a logs/audio.log || true
-
-          # Fix any CRLF line endings in config files
-          sed -i 's/\r$//' techpack/audio/config/waipioauto.conf techpack/audio/config/waipioautoconf.h 2>/dev/null || true
-
-          # Attempt 1: build with fixed line endings
           make -C kernel O=out M="$PWD/techpack/audio" \
             AUDIO_ROOT="$PWD/techpack/audio" \
+            MODNAME=audio \
             KERNEL_SRC="$PWD/kernel" \
             KCPPFLAGS="-I$PWD/kernel -I$PWD/techpack/audio/include -I$PWD/techpack/audio/include/uapi" \
             LLVM=1 LLVM_IAS=1 \
-            -j"$(nproc)" modules 2>&1 | tee -a logs/audio.log || true
-
-          # Attempt 2: switch top-level Kbuild obj-y to obj-m for Linux 6.6 out-of-tree modules
-          if [ -z "$(find techpack/audio -name '*.ko')" ]; then
-            echo "=== Retrying with obj-m in techpack/audio/Kbuild ===" | tee -a logs/audio.log
-            sed -i 's/^obj-y/obj-m/' techpack/audio/Kbuild
-            make -C kernel O=out M="$PWD/techpack/audio" \
-              AUDIO_ROOT="$PWD/techpack/audio" \
-              KERNEL_SRC="$PWD/kernel" \
-              KCPPFLAGS="-I$PWD/kernel -I$PWD/techpack/audio/include -I$PWD/techpack/audio/include/uapi" \
-              LLVM=1 LLVM_IAS=1 \
-              -j"$(nproc)" modules 2>&1 | tee -a logs/audio.log || true
-          fi
-
-          # Attempt 3: direct verbose test of ipc/ subdir if still 0 .ko
-          if [ -z "$(find techpack/audio -name '*.ko')" ]; then
-            echo "=== Direct verbose test on techpack/audio/ipc ===" | tee -a logs/audio.log
-            make -C kernel O=out M="$PWD/techpack/audio/ipc" \
-              AUDIO_ROOT="$PWD/techpack/audio" \
-              KERNEL_SRC="$PWD/kernel" \
-              KCPPFLAGS="-I$PWD/kernel -I$PWD/techpack/audio/include -I$PWD/techpack/audio/include/uapi" \
-              LLVM=1 LLVM_IAS=1 V=1 \
-              modules 2>&1 | tee -a logs/audio.log || true
-          fi
+            -j"$(nproc)" modules 2>&1 | tee logs/audio.log || true
 
           echo "=== audio .ko produced ===" | tee -a logs/audio.log
           find techpack/audio -name "*.ko" | tee -a logs/audio.log
