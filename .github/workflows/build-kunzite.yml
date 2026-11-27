@@ -150,6 +150,12 @@ jobs:
           export ARCH=arm64
           export SUBARCH=arm64
 
+          : > logs/audio.log
+          for d in sipa fs181x lct_audio_info; do
+            echo "=== codecs/$d/Kbuild ===" | tee -a logs/audio.log
+            cat "techpack/audio/asoc/codecs/$d/Kbuild" 2>/dev/null | tee -a logs/audio.log || true
+          done
+
           EXT_DISP_DIR="$(find kernel techpack -name 'msm_ext_display.h' -exec dirname {} \; | head -n 1)"
           AUDIO_INC="-I$PWD/kernel -I$PWD/techpack/audio/include -I$PWD/techpack/audio/include/uapi"
           if [ -n "$EXT_DISP_DIR" ]; then
@@ -162,10 +168,14 @@ jobs:
           make -C kernel O=out M="$PWD/techpack/audio" \
             AUDIO_ROOT="$PWD/techpack/audio" \
             MODNAME=audio \
+            CONFIG_SND_SOC_SIPA=m \
+            CONFIG_SND_SOC_FS181X=m \
+            CONFIG_LCT_AUDIO_INFO=m \
+            CONFIG_XIAOMI_AUDIO_MBHC=m \
             KERNEL_SRC="$PWD/kernel" \
             KCPPFLAGS="$AUDIO_INC" \
             LLVM=1 LLVM_IAS=1 \
-            -j"$(nproc)" modules 2>&1 | tee logs/audio.log || true
+            -j"$(nproc)" modules 2>&1 | tee -a logs/audio.log || true
 
           echo "=== audio .ko produced ===" | tee -a logs/audio.log
           find techpack/audio -name "*.ko" | tee -a logs/audio.log
@@ -200,3 +210,4 @@ jobs:
         with:
           name: kunzite-oss-stage2-artifacts
           path: dist/
+          
