@@ -18,19 +18,31 @@ jobs:
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           df -h
 
-      - name: Checkout kunzite-v-oss
+      - name: Checkout kunzite-v-oss core kernel
         uses: actions/checkout@v4
         with:
           ref: kunzite-v-oss
           fetch-depth: 1
           path: kernel
 
+      - name: Clone Stage 2 MiCode kunzite-v-oss companion repos
+        run: |
+          mkdir -p techpack logs
+          git clone --depth=1 -b kunzite-v-oss https://github.com/MiCode/kernel_devicetree.git devicetree
+          git clone --depth=1 -b kunzite-v-oss https://github.com/MiCode/vendor_qcom_opensource_audio-kernel.git techpack/audio
+          git clone --depth=1 -b kunzite-v-oss https://github.com/MiCode/vendor_qcom_opensource_camera-kernel.git techpack/camera
+          git clone --depth=1 -b kunzite-v-oss https://github.com/MiCode/vendor_qcom_opensource_data-kernel.git techpack/data
+
+          echo "=== Companion repo layouts ==="
+          ls -la devicetree techpack/audio techpack/camera techpack/data
+
       - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             bc bison flex libssl-dev libelf-dev python3 \
-            cpio lz4 zstd zip curl ca-certificates dwarves
+            cpio lz4 zstd zip curl ca-certificates dwarves \
+            device-tree-compiler libfdt-dev
 
       - name: Download AOSP Clang 18 (Android 15 / 6.6)
         run: |
@@ -41,7 +53,7 @@ jobs:
           rm -f clang.tar.gz
           ./clang/bin/clang --version
 
-      - name: Inspect Kunzite configs and compile OSS Image + modules
+      - name: Compile core OSS Image and in-tree modules
         shell: bash
         env:
           LOCALVERSION: ${{ github.event.inputs.localversion }}
@@ -52,10 +64,6 @@ jobs:
           export SUBARCH=arm64
 
           cd kernel
-          echo "=== kunzite_perf.config (first 40 lines) ==="
-          head -n 40 arch/arm64/configs/vendor/kunzite_perf.config || true
-
-          # Start from gki_defconfig, then merge parrot_perf + kunzite_perf
           make O=out LLVM=1 LLVM_IAS=1 gki_defconfig
 
           if [ -f arch/arm64/configs/vendor/parrot_perf.config ]; then
@@ -70,32 +78,109 @@ jobs:
             --enable IKCONFIG_PROC
 
           make O=out LLVM=1 LLVM_IAS=1 olddefconfig
+          make O=out LLVM=1 LLVM_IAS=1 -j"$(nproc)" Image modules 2>&1 | tee ../logs/core-build.log
 
-          # Compile OSS kernel Image and in-tree modules
-          make O=out LLVM=1 LLVM_IAS=1 -j"$(nproc)" Image modules 2>&1 | tee ../build.log
+      - name: Build Stage 2 - Device Trees (kernel_devicetree)
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          export PATH="$PWD/clang/bin:$PATH"
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export KERNEL_SRC="$PWD/kernel"
 
-      - name: Show tail of build log on failure
-        if: failure()
-        run: tail -n 80 build.log
+          echo "=== Kunzite/Parrot DTS files ==="
+          find devicetree -maxdepth 4 \( -name "*kunzite*" -o -name "*parrot*" \) | tee logs/devicetree.log
 
-      - name: Upload build log (always)
+          # Link devicetree into kernel tree if qcom Makefile expects it, or build via Kbuild/Makefile
+          if [ -f devicetree/Makefile ] || [ -f devicetree/Kbuild ]; then
+            make -C kernel O=out M="$PWD/devicetree" \
+              LLVM=1 LLVM_IAS=1 DTC="$PWD/kernel/out/scripts/dtc/dtc" \
+              -j"$(nproc)" 2>&1 | tee -a logs/devicetree.log
+          else
+            echo "No top-level Makefile/Kbuild in devicetree — listing build files:" | tee -a logs/devicetree.log
+            find devicetree -maxdepth 3 \( -name "Makefile" -o -name "Kbuild" -o -name "BUILD.bazel" \) | tee -a logs/devicetree.log
+          fi
+
+      - name: Build Stage 2 - Audio Kernel (audio-kernel)
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          export PATH="$PWD/clang/bin:$PATH"
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export KERNEL_SRC="$PWD/kernel"
+          export MODNAME=audio
+
+          make -C kernel O=out M="$PWD/techpack/audio" \
+            LLVM=1 LLVM_IAS=1 \
+            -j"$(nproc)" modules 2>&1 | tee logs/audio.log
+
+      - name: Build Stage 2 - Camera Kernel (camera-kernel)
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          export PATH="$PWD/clang/bin:$PATH"
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export KERNEL_SRC="$PWD/kernel"
+
+          make -C kernel O=out M="$PWD/techpack/camera" \
+            LLVM=1 LLVM_IAS=1 \
+            -j"$(nproc)" modules 2>&1 | tee logs/camera.log
+
+      - name: Build Stage 2 - Data Kernel (data-kernel)
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          export PATH="$PWD/clang/bin:$PATH"
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export KERNEL_SRC="$PWD/kernel"
+
+          make -C kernel O=out M="$PWD/techpack/data" \
+            LLVM=1 LLVM_IAS=1 \
+            -j"$(nproc)" modules 2>&1 | tee logs/data.log
+
+      - name: Stage 2 Summary (tail of each module log)
+        if: always()
+        run: |
+          for f in logs/devicetree.log logs/audio.log logs/camera.log logs/data.log; do
+            echo "========================================"
+            echo "TAIL OF $f"
+            echo "========================================"
+            tail -n 35 "$f" 2>/dev/null || echo "(no log)"
+          done
+
+      - name: Collect compiled OSS artifacts
+        if: always()
+        run: |
+          mkdir -p dist/modules/intree dist/modules/oot dist/dtbs
+          cp kernel/out/arch/arm64/boot/Image dist/ 2>/dev/null || true
+          find kernel/out -name "*.ko" -exec cp {} dist/modules/intree/ \; 2>/dev/null || true
+          find techpack -name "*.ko" -exec cp {} dist/modules/oot/ \; 2>/dev/null || true
+          find devicetree kernel/out -name "*.dtb" -o -name "*.dtbo" -exec cp {} dist/dtbs/ \; 2>/dev/null || true
+
+          echo "=== Artifact counts ==="
+          echo "Image: $(ls -lh dist/Image 2>/dev/null || echo missing)"
+          echo "In-tree .ko: $(ls dist/modules/intree | wc -l)"
+          echo "Out-of-tree .ko: $(ls dist/modules/oot | wc -l)"
+          echo "DTB/DTBO: $(ls dist/dtbs | wc -l)"
+
+      - name: Upload Stage 2 logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: oss-build-log
-          path: build.log
+          name: stage2-logs
+          path: logs/
 
-      - name: Upload compiled OSS Image and modules
-        if: success()
-        run: |
-          mkdir -p dist/modules
-          cp kernel/out/arch/arm64/boot/Image dist/
-          find kernel/out -name "*.ko" -exec cp {} dist/modules/ \;
-          ls -lh dist/ dist/modules/ | head -n 40
-      - name: Upload OSS artifacts
-        if: success()
+      - name: Upload OSS Image, modules, and DTBs
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: kunzite-oss-artifacts
+          name: kunzite-oss-stage2-artifacts
           path: dist/
-          
