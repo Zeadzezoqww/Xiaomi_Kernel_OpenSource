@@ -90,10 +90,9 @@ jobs:
           export SUBARCH=arm64
           export KERNEL_SRC="$PWD/kernel"
 
-          echo "=== Kunzite/Parrot DTS files ==="
-          find devicetree -maxdepth 4 \( -name "*kunzite*" -o -name "*parrot*" \) | tee logs/devicetree.log
+          echo "=== Kunzite/Parrot DTS files ===" | tee logs/devicetree.log
+          find devicetree -maxdepth 4 \( -name "*kunzite*" -o -name "*parrot*" \) | tee -a logs/devicetree.log
 
-          # Link devicetree into kernel tree if qcom Makefile expects it, or build via Kbuild/Makefile
           if [ -f devicetree/Makefile ] || [ -f devicetree/Kbuild ]; then
             make -C kernel O=out M="$PWD/devicetree" \
               LLVM=1 LLVM_IAS=1 DTC="$PWD/kernel/out/scripts/dtc/dtc" \
@@ -111,10 +110,10 @@ jobs:
           export PATH="$PWD/clang/bin:$PATH"
           export ARCH=arm64
           export SUBARCH=arm64
-          export KERNEL_SRC="$PWD/kernel"
-          export MODNAME=audio
 
           make -C kernel O=out M="$PWD/techpack/audio" \
+            AUDIO_ROOT="$PWD/techpack/audio" \
+            KERNEL_SRC="$PWD/kernel" \
             LLVM=1 LLVM_IAS=1 \
             -j"$(nproc)" modules 2>&1 | tee logs/audio.log
 
@@ -126,11 +125,15 @@ jobs:
           export PATH="$PWD/clang/bin:$PATH"
           export ARCH=arm64
           export SUBARCH=arm64
-          export KERNEL_SRC="$PWD/kernel"
+
+          sed -n '1,60p' techpack/camera/Kbuild > logs/camera.log || true
 
           make -C kernel O=out M="$PWD/techpack/camera" \
+            CAMERA_KERNEL_ROOT="$PWD/techpack/camera" \
+            CAM_ROOT="$PWD/techpack/camera" \
+            KERNEL_SRC="$PWD/kernel" \
             LLVM=1 LLVM_IAS=1 \
-            -j"$(nproc)" modules 2>&1 | tee logs/camera.log
+            -j"$(nproc)" modules 2>&1 | tee -a logs/camera.log
 
       - name: Build Stage 2 - Data Kernel (data-kernel)
         continue-on-error: true
@@ -140,11 +143,19 @@ jobs:
           export PATH="$PWD/clang/bin:$PATH"
           export ARCH=arm64
           export SUBARCH=arm64
-          export KERNEL_SRC="$PWD/kernel"
 
-          make -C kernel O=out M="$PWD/techpack/data" \
-            LLVM=1 LLVM_IAS=1 \
-            -j"$(nproc)" modules 2>&1 | tee logs/data.log
+          echo "=== data-kernel build files ===" | tee logs/data.log
+          find techpack/data -maxdepth 4 \( -name "Kbuild" -o -name "Makefile" \) | tee -a logs/data.log
+
+          for kb in $(find techpack/data/drivers -name "Kbuild" 2>/dev/null); do
+            dir="$(dirname "$kb")"
+            echo "=== Building $dir ===" | tee -a logs/data.log
+            make -C kernel O=out M="$PWD/$dir" \
+              DATA_ROOT="$PWD/techpack/data" \
+              KERNEL_SRC="$PWD/kernel" \
+              LLVM=1 LLVM_IAS=1 \
+              -j"$(nproc)" modules 2>&1 | tee -a logs/data.log || true
+          done
 
       - name: Stage 2 Summary (tail of each module log)
         if: always()
@@ -184,3 +195,4 @@ jobs:
         with:
           name: kunzite-oss-stage2-artifacts
           path: dist/
+          
