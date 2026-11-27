@@ -4,12 +4,12 @@ on:
   workflow_dispatch:
     inputs:
       localversion:
-        description: "Kernel suffix"
+        description: "Kernel suffix (keep -android15-... format for GKI/KMI)"
         required: false
-        default: "-kunzite-oss"
+        default: "-android15-8-kunzite-oss"
 
 jobs:
-  build-oss:
+  build-oss-kmi:
     runs-on: ubuntu-24.04
 
     steps:
@@ -25,13 +25,10 @@ jobs:
           fetch-depth: 1
           path: kernel
 
-      - name: Clone Stage 2 MiCode kunzite-v-oss companion repos
+      - name: Clone MiCode kernel_devicetree (kunzite-v-oss)
         run: |
-          mkdir -p techpack logs
+          mkdir -p logs
           git clone --depth=1 -b kunzite-v-oss https://github.com/MiCode/kernel_devicetree.git devicetree
-          git clone --depth=1 -b kunzite-v-oss https://github.com/MiCode/vendor_qcom_opensource_audio-kernel.git techpack/audio
-          git clone --depth=1 -b kunzite-v-oss https://github.com/MiCode/vendor_qcom_opensource_camera-kernel.git techpack/camera
-          git clone --depth=1 -b kunzite-v-oss https://github.com/MiCode/vendor_qcom_opensource_data-kernel.git techpack/data
 
       - name: Install build dependencies
         run: |
@@ -59,7 +56,7 @@ jobs:
           rm -f clang.tar.gz
           ./clang/bin/clang --version
 
-      - name: Compile core OSS Image and in-tree modules
+      - name: Compile KMI-safe kunzite-v-oss Image
         shell: bash
         env:
           LOCALVERSION: ${{ github.event.inputs.localversion }}
@@ -70,12 +67,8 @@ jobs:
           export SUBARCH=arm64
 
           cd kernel
+          # Pure gki_defconfig preserves Android 15 6.6 KMI for stock vendor_dlkm/vendor_boot modules
           make O=out LLVM=1 LLVM_IAS=1 gki_defconfig
-
-          if [ -f arch/arm64/configs/vendor/parrot_perf.config ]; then
-            scripts/kconfig/merge_config.sh -m -O out out/.config arch/arm64/configs/vendor/parrot_perf.config
-          fi
-          scripts/kconfig/merge_config.sh -m -O out out/.config arch/arm64/configs/vendor/kunzite_perf.config
 
           scripts/config --file out/.config \
             --disable LOCALVERSION_AUTO \
@@ -84,9 +77,11 @@ jobs:
             --enable IKCONFIG_PROC
 
           make O=out LLVM=1 LLVM_IAS=1 olddefconfig
-          make O=out LLVM=1 LLVM_IAS=1 -j"$(nproc)" Image modules 2>&1 | tee ../logs/core-build.log
+          make O=out LLVM=1 LLVM_IAS=1 -j"$(nproc)" Image 2>&1 | tee ../logs/core-build.log
 
-      - name: Build Stage 2 - Device Trees (parrot + kunzite overlay)
+          ls -lh out/arch/arm64/boot/Image
+
+      - name: Compile Kunzite DTBs and overlay DTBO
         continue-on-error: true
         shell: bash
         run: |
@@ -115,99 +110,58 @@ jobs:
           compile_dt "devicetree/qcom/kunzite-sm6475-overlay.dts" "out_dtbs/kunzite-sm6475-overlay.dtbo" 2>&1 | tee -a logs/devicetree.log || true
           ls -lh out_dtbs/*.dtb out_dtbs/*.dtbo | tee -a logs/devicetree.log
 
-      - name: Build Stage 2 - Camera Kernel (camera-kernel)
-        continue-on-error: true
-        shell: bash
+      - name: Package flashable AnyKernel3 zip (boot Image only)
         run: |
-          set -o pipefail
-          export PATH="$PWD/clang/bin:$PATH"
-          export ARCH=arm64
-          export SUBARCH=arm64
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
+          cp kernel/out/arch/arm64/boot/Image AnyKernel3/Image
 
-          CAM_TFE_DIR="$(find techpack/camera -name 'cam_tfe.h' -exec dirname {} \; | head -n 1)"
-          KINC="-I$PWD/kernel"
-          if [ -n "$CAM_TFE_DIR" ]; then
-            KINC="$KINC -I$PWD/$CAM_TFE_DIR"
-          fi
+          cat << 'EOF' > AnyKernel3/anykernel.sh
+          ### AnyKernel3 Ramdisk Mod Script
+          properties() { '
+          kernel.string=Kunzite OSS 6.6 (KMI-safe)
+          do.devicecheck=0
+          do.modules=0
+          do.systemless=1
+          do.cleanup=1
+          do.cleanuponabort=0
+          device.name1=kunzite
+          supported.versions=15-17
+          '; }
 
-          make -C kernel O=out M="$PWD/techpack/camera" \
-            CAMERA_KERNEL_ROOT="$PWD/techpack/camera" \
-            CAM_ROOT="$PWD/techpack/camera" \
-            KERNEL_SRC="$PWD/kernel" \
-            KCPPFLAGS="$KINC" \
-            LLVM=1 LLVM_IAS=1 \
-            -j"$(nproc)" modules 2>&1 | tee logs/camera.log
+          BLOCK=auto;
+          IS_SLOT_DEVICE=1;
+          RAMDISK_COMPRESSION=auto;
+          PATCH_VBMETA_FLAG=auto;
 
-          echo "=== camera .ko produced ===" | tee -a logs/camera.log
-          find techpack/camera -name "*.ko" | tee -a logs/camera.log
+          . tools/ak3-core.sh;
 
-      - name: Build Stage 2 - Audio Kernel (audio-kernel)
-        continue-on-error: true
-        shell: bash
-        run: |
-          set -o pipefail
-          export PATH="$PWD/clang/bin:$PATH"
-          export ARCH=arm64
-          export SUBARCH=arm64
+          split_boot;
+          flash_boot;
+          EOF
 
-          : > logs/audio.log
-          for d in sipa fs181x lct_audio_info; do
-            echo "=== codecs/$d/Kbuild ===" | tee -a logs/audio.log
-            cat "techpack/audio/asoc/codecs/$d/Kbuild" 2>/dev/null | tee -a logs/audio.log || true
-          done
+          cd AnyKernel3
+          zip -r9 ../AnyKernel3-kunzite-oss.zip * -x .git README.md '*placeholder'
+          ls -lh ../AnyKernel3-kunzite-oss.zip
 
-          EXT_DISP_DIR="$(find kernel techpack -name 'msm_ext_display.h' -exec dirname {} \; | head -n 1)"
-          AUDIO_INC="-I$PWD/kernel -I$PWD/techpack/audio/include -I$PWD/techpack/audio/include/uapi"
-          if [ -n "$EXT_DISP_DIR" ]; then
-            AUDIO_INC="$AUDIO_INC -I$PWD/$EXT_DISP_DIR"
-          else
-            sed -i '/CONFIG_SND_SOC_MSM_HDMI_CODEC_RX/d' techpack/audio/config/waipioauto.conf
-            sed -i '/CONFIG_SND_SOC_MSM_HDMI_CODEC_RX/d' techpack/audio/config/waipioautoconf.h 2>/dev/null || true
-          fi
-
-          make -C kernel O=out M="$PWD/techpack/audio" \
-            AUDIO_ROOT="$PWD/techpack/audio" \
-            MODNAME=audio \
-            CONFIG_SND_SOC_SIPA=m \
-            CONFIG_SND_SOC_FS181X=m \
-            CONFIG_LCT_AUDIO_INFO=m \
-            CONFIG_XIAOMI_AUDIO_MBHC=m \
-            KERNEL_SRC="$PWD/kernel" \
-            KCPPFLAGS="$AUDIO_INC" \
-            LLVM=1 LLVM_IAS=1 \
-            -j"$(nproc)" modules 2>&1 | tee -a logs/audio.log || true
-
-          echo "=== audio .ko produced ===" | tee -a logs/audio.log
-          find techpack/audio -name "*.ko" | tee -a logs/audio.log
-
-      - name: Collect compiled OSS artifacts
+      - name: Collect outputs
         if: always()
         run: |
-          mkdir -p dist/modules/intree dist/modules/oot dist/dtbs
+          mkdir -p dist/dtbs
           cp kernel/out/arch/arm64/boot/Image dist/ 2>/dev/null || true
-          find kernel/out -name "*.ko" -exec cp {} dist/modules/intree/ \; 2>/dev/null || true
-          find techpack -name "*.ko" -exec cp {} dist/modules/oot/ \; 2>/dev/null || true
+          cp AnyKernel3-kunzite-oss.zip dist/ 2>/dev/null || true
           cp out_dtbs/*.dtb out_dtbs/*.dtbo dist/dtbs/ 2>/dev/null || true
+          ls -lh dist/ dist/dtbs/
 
-          echo "=== Artifact counts ==="
-          echo "Image: $(ls -lh dist/Image 2>/dev/null || echo missing)"
-          echo "In-tree .ko: $(ls dist/modules/intree | wc -l)"
-          echo "Out-of-tree .ko: $(ls dist/modules/oot | wc -l)"
-          echo "DTB/DTBO: $(ls dist/dtbs | wc -l)"
-          echo "=== Out-of-tree .ko list ==="
-          ls -lh dist/modules/oot/
-
-      - name: Upload Stage 2 logs
+      - name: Upload build logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: stage2-logs
+          name: kunzite-kmi-logs
           path: logs/
 
-      - name: Upload OSS Image, modules, and DTBs
-        if: always()
+      - name: Upload flashable AnyKernel3 zip, Image, and DTBs
+        if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: kunzite-oss-stage2-artifacts
+          name: kunzite-oss-flashable
           path: dist/
-          
