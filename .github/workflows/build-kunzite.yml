@@ -150,28 +150,18 @@ jobs:
           export ARCH=arm64
           export SUBARCH=arm64
 
-          echo "=== waipioauto.conf ===" | tee logs/audio.log
-          cat techpack/audio/config/waipioauto.conf | tee -a logs/audio.log || true
-          echo "=== ipc/Kbuild (lines 45-100) ===" | tee -a logs/audio.log
-          sed -n '45,100p' techpack/audio/ipc/Kbuild | tee -a logs/audio.log || true
+          echo "=== techpack/audio/Makefile ===" | tee logs/audio.log
+          cat techpack/audio/Makefile | tee -a logs/audio.log || true
+          echo "=== ipc/Kbuild (lines 101-180) ===" | tee -a logs/audio.log
+          sed -n '101,180p' techpack/audio/ipc/Kbuild | tee -a logs/audio.log || true
 
-          make -C kernel O=out M="$PWD/techpack/audio" \
+          make -C techpack/audio \
+            KERNEL_SRC="$PWD/kernel/out" \
+            M="$PWD/techpack/audio" \
             AUDIO_ROOT="$PWD/techpack/audio" \
-            KERNEL_SRC="$PWD/kernel" \
             KCPPFLAGS="-I$PWD/kernel -I$PWD/techpack/audio/include -I$PWD/techpack/audio/include/uapi" \
             LLVM=1 LLVM_IAS=1 \
-            -j"$(nproc)" modules 2>&1 | tee -a logs/audio.log || true
-
-          if [ -z "$(find techpack/audio -name '*.ko')" ]; then
-            echo "=== 0 audio .ko built; converting =y to =m in waipioauto.conf and retrying ===" | tee -a logs/audio.log
-            sed -i 's/=y$/=m/g' techpack/audio/config/waipioauto.conf
-            make -C kernel O=out M="$PWD/techpack/audio" \
-              AUDIO_ROOT="$PWD/techpack/audio" \
-              KERNEL_SRC="$PWD/kernel" \
-              KCPPFLAGS="-I$PWD/kernel -I$PWD/techpack/audio/include -I$PWD/techpack/audio/include/uapi" \
-              LLVM=1 LLVM_IAS=1 \
-              -j"$(nproc)" modules 2>&1 | tee -a logs/audio.log || true
-          fi
+            -j"$(nproc)" 2>&1 | tee -a logs/audio.log || true
 
           echo "=== audio .ko produced ===" | tee -a logs/audio.log
           find techpack/audio -name "*.ko" | tee -a logs/audio.log
