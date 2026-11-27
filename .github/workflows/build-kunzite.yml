@@ -1,0 +1,101 @@
+name: Build Kunzite OSS Kernel
+
+on:
+  workflow_dispatch:
+    inputs:
+      localversion:
+        description: "Kernel suffix"
+        required: false
+        default: "-kunzite-oss"
+
+jobs:
+  build-oss:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Free up runner disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h
+
+      - name: Checkout kunzite-v-oss
+        uses: actions/checkout@v4
+        with:
+          ref: kunzite-v-oss
+          fetch-depth: 1
+          path: kernel
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc bison flex libssl-dev libelf-dev python3 \
+            cpio lz4 zstd zip curl ca-certificates dwarves
+
+      - name: Download AOSP Clang 18 (Android 15 / 6.6)
+        run: |
+          mkdir -p clang
+          curl -fL "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r522817.tar.gz" \
+            -o clang.tar.gz
+          tar -xf clang.tar.gz -C clang
+          rm -f clang.tar.gz
+          ./clang/bin/clang --version
+
+      - name: Inspect Kunzite configs and compile OSS Image + modules
+        shell: bash
+        env:
+          LOCALVERSION: ${{ github.event.inputs.localversion }}
+        run: |
+          set -o pipefail
+          export PATH="$PWD/clang/bin:$PATH"
+          export ARCH=arm64
+          export SUBARCH=arm64
+
+          cd kernel
+          echo "=== kunzite_perf.config (first 40 lines) ==="
+          head -n 40 arch/arm64/configs/vendor/kunzite_perf.config || true
+
+          # Start from gki_defconfig, then merge parrot_perf + kunzite_perf
+          make O=out LLVM=1 LLVM_IAS=1 gki_defconfig
+
+          if [ -f arch/arm64/configs/vendor/parrot_perf.config ]; then
+            scripts/kconfig/merge_config.sh -m -O out out/.config arch/arm64/configs/vendor/parrot_perf.config
+          fi
+          scripts/kconfig/merge_config.sh -m -O out out/.config arch/arm64/configs/vendor/kunzite_perf.config
+
+          scripts/config --file out/.config \
+            --disable LOCALVERSION_AUTO \
+            --set-str LOCALVERSION "$LOCALVERSION" \
+            --enable IKCONFIG \
+            --enable IKCONFIG_PROC
+
+          make O=out LLVM=1 LLVM_IAS=1 olddefconfig
+
+          # Compile OSS kernel Image and in-tree modules
+          make O=out LLVM=1 LLVM_IAS=1 -j"$(nproc)" Image modules 2>&1 | tee ../build.log
+
+      - name: Show tail of build log on failure
+        if: failure()
+        run: tail -n 80 build.log
+
+      - name: Upload build log (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: oss-build-log
+          path: build.log
+
+      - name: Upload compiled OSS Image and modules
+        if: success()
+        run: |
+          mkdir -p dist/modules
+          cp kernel/out/arch/arm64/boot/Image dist/
+          find kernel/out -name "*.ko" -exec cp {} dist/modules/ \;
+          ls -lh dist/ dist/modules/ | head -n 40
+      - name: Upload OSS artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kunzite-oss-artifacts
+          path: dist/
+          
