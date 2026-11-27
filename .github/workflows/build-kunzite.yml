@@ -150,11 +150,20 @@ jobs:
           export ARCH=arm64
           export SUBARCH=arm64
 
+          EXT_DISP_DIR="$(find kernel techpack -name 'msm_ext_display.h' -exec dirname {} \; | head -n 1)"
+          AUDIO_INC="-I$PWD/kernel -I$PWD/techpack/audio/include -I$PWD/techpack/audio/include/uapi"
+          if [ -n "$EXT_DISP_DIR" ]; then
+            AUDIO_INC="$AUDIO_INC -I$PWD/$EXT_DISP_DIR"
+          else
+            sed -i '/CONFIG_SND_SOC_MSM_HDMI_CODEC_RX/d' techpack/audio/config/waipioauto.conf
+            sed -i '/CONFIG_SND_SOC_MSM_HDMI_CODEC_RX/d' techpack/audio/config/waipioautoconf.h 2>/dev/null || true
+          fi
+
           make -C kernel O=out M="$PWD/techpack/audio" \
             AUDIO_ROOT="$PWD/techpack/audio" \
             MODNAME=audio \
             KERNEL_SRC="$PWD/kernel" \
-            KCPPFLAGS="-I$PWD/kernel -I$PWD/techpack/audio/include -I$PWD/techpack/audio/include/uapi" \
+            KCPPFLAGS="$AUDIO_INC" \
             LLVM=1 LLVM_IAS=1 \
             -j"$(nproc)" modules 2>&1 | tee logs/audio.log || true
 
